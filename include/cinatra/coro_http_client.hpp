@@ -180,15 +180,6 @@ class coro_http_client : public std::enable_shared_from_this<coro_http_client> {
 
   ~coro_http_client() { close(); }
 
-  void close() {
-    if (socket_ == nullptr || socket_->has_closed_)
-      return;
-
-    asio::dispatch(executor_wrapper_.get_asio_executor(), [socket = socket_] {
-      close_socket(*socket);
-    });
-  }
-
   coro_io::ExecutorWrapper<> &get_executor() { return executor_wrapper_; }
 
   const config &get_config() { return config_; }
@@ -683,7 +674,13 @@ class coro_http_client : public std::enable_shared_from_this<coro_http_client> {
 
   void reset() {
     if (!has_closed()) {
-      close_socket(*socket_);
+      std::promise<void> promise;
+      asio::dispatch(executor_wrapper_.get_asio_executor(),
+                     [&promise, socket = socket_] {
+                       close_socket(*socket);
+                       promise.set_value();
+                     });
+      promise.get_future().wait();
     }
 
     socket_->impl_ = asio::ip::tcp::socket{executor_wrapper_.context()};
@@ -723,6 +720,15 @@ class coro_http_client : public std::enable_shared_from_this<coro_http_client> {
   std::string_view get_port() { return port_; }
 
  private:
+  void close() {
+    if (socket_ == nullptr || socket_->has_closed_)
+      return;
+
+    asio::dispatch(executor_wrapper_.get_asio_executor(), [socket = socket_] {
+      close_socket(*socket);
+    });
+  }
+
   async_simple::coro::Lazy<void> send_file_copy_with_chunked(
       std::string_view source, std::error_code &ec) {
     std::string file_data;
@@ -2343,6 +2349,7 @@ class coro_http_client : public std::enable_shared_from_this<coro_http_client> {
   }
 
   static void close_socket(socket_t &socket) {
+    assert(*coro_io::get_current() == &socket.impl_.get_executor().context());
     std::error_code ec;
     socket.impl_.shutdown(asio::ip::tcp::socket::shutdown_both, ec);
     socket.impl_.close(ec);
